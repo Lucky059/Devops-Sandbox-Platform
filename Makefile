@@ -36,6 +36,9 @@ up:
 	# Start health monitor in background
 	nohup python3 monitor/poller.py > logs/monitor.log 2>&1 &
 	@echo "$$!" > logs/monitor.pid
+    
+	@echo "⏳ Waiting for platform to stabilize..."
+	@sleep 25
 
 	@echo ""
 	@echo "✅ Platform is up!"

@@ -5,4 +5,4 @@ nginx/conf.d/*.conf
 !nginx/conf.d/.gitkeep
 __pycache__/
 *.pyc
-*.pid
+*.pid.env
