@@ -2,9 +2,20 @@
 # create_env.sh — spin up a new isolated environment
 set -euo pipefail
 
+# ── Load .env if it exists ────────────────────────────────
+if [[ -f ".env" ]]; then
+    set -a
+    source .env
+    set +a
+fi
+
+# ── Config from environment variables ────────────────────
+APP_PORT="${APP_PORT:-3000}"
+DEFAULT_TTL="${DEFAULT_TTL:-1800}"
+
 # ── Args ─────────────────────────────────────────────────
 NAME="${1:-}"
-TTL="${2:-1800}"   # default 30 minutes
+TTL="${2:-$DEFAULT_TTL}"
 
 if [[ -z "$NAME" ]]; then
     echo "Usage: ./platform/create_env.sh <name> [ttl_seconds]"
@@ -15,7 +26,6 @@ fi
 ENV_ID="env-$(cat /proc/sys/kernel/random/uuid | tr -d '-' | head -c 8)"
 NETWORK_NAME="net-${ENV_ID}"
 CONTAINER_NAME="app-${ENV_ID}"
-APP_PORT=3000
 CREATED_AT=$(date -u +%s)
 EXPIRES_AT=$((CREATED_AT + TTL))
 STATE_FILE="envs/${ENV_ID}.json"
@@ -47,6 +57,7 @@ docker run -d \
     --label "sandbox.name=$NAME" \
     -e ENV_ID="$ENV_ID" \
     -e ENV_NAME="$NAME" \
+    -e APP_PORT="$APP_PORT" \
     sandbox-demo-app:latest > /dev/null
 
 # ── Start log shipping ────────────────────────────────────
@@ -88,7 +99,7 @@ cat > "$TMP_STATE" << JSON
 }
 JSON
 mv "$TMP_STATE" "$STATE_FILE"
-echo "  → State saved to $STATE_FILE"
+echo "  → State saved"
 
 # ── Done ──────────────────────────────────────────────────
 echo ""

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 api.py — Flask control API for DevOps Sandbox Platform
-Wraps shell scripts with HTTP endpoints.
+All config loaded from .env — nothing hardcoded.
 """
 
 import os
@@ -9,12 +9,25 @@ import json
 import subprocess
 import glob
 from datetime import datetime, timezone
+from pathlib import Path
 from flask import Flask, request, jsonify
 
-app = Flask(__name__)
+# ── Load .env if it exists ────────────────────────────────
+env_file = Path(".env")
+if env_file.exists():
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
 
-ENVS_DIR = "envs"
-LOGS_DIR = "logs"
+# ── Config from environment variables ────────────────────
+ENVS_DIR    = "envs"
+LOGS_DIR    = "logs"
+DEFAULT_TTL = int(os.getenv("DEFAULT_TTL", "1800"))
+API_PORT    = int(os.getenv("API_PORT",    "5000"))
+
+app = Flask(__name__)
 
 
 # ── Helpers ───────────────────────────────────────────────
@@ -52,31 +65,28 @@ def run_script(script, *args):
 
 @app.route("/envs", methods=["POST"])
 def create_env():
-    """POST /envs — create a new environment"""
-    data    = request.get_json(silent=True) or {}
-    name    = data.get("name", "unnamed")
-    ttl     = str(data.get("ttl", 1800))
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "unnamed")
+    ttl  = str(data.get("ttl", DEFAULT_TTL))
 
     code, out, err = run_script("platform/create_env.sh", name, ttl)
     if code != 0:
         return jsonify({"error": err or "Failed to create environment"}), 500
 
-    # Find the newly created env by name
     all_envs = list_envs()
     new_env  = next((e for e in all_envs if e["name"] == name), None)
 
     return jsonify({
-        "message":     "Environment created",
-        "env":         new_env,
+        "message":       "Environment created",
+        "env":           new_env,
         "ttl_remaining": ttl_remaining(new_env) if new_env else None,
-        "url":         f"http://localhost/{new_env['id']}/" if new_env else None
+        "url":           f"http://localhost/{new_env['id']}/" if new_env else None
     }), 201
 
 
 @app.route("/envs", methods=["GET"])
 def list_all_envs():
-    """GET /envs — list all active environments with TTL remaining"""
-    envs = list_envs()
+    envs   = list_envs()
     result = []
     for e in envs:
         result.append({
@@ -89,53 +99,40 @@ def list_all_envs():
 
 @app.route("/envs/<env_id>", methods=["DELETE"])
 def destroy_env(env_id):
-    """DELETE /envs/:id — destroy an environment"""
-    state = load_state(env_id)
-    if not state:
+    if not load_state(env_id):
         return jsonify({"error": f"Environment {env_id} not found"}), 404
 
     code, out, err = run_script("platform/destroy_env.sh", env_id)
     if code != 0:
-        return jsonify({"error": err or "Failed to destroy environment"}), 500
+        return jsonify({"error": err or "Failed to destroy"}), 500
 
     return jsonify({"message": f"Environment {env_id} destroyed"})
 
 
 @app.route("/envs/<env_id>/logs", methods=["GET"])
 def get_logs(env_id):
-    """GET /envs/:id/logs — last 100 lines of app.log"""
     log_file = os.path.join(LOGS_DIR, env_id, "app.log")
-
-    # Check archived logs too
     if not os.path.exists(log_file):
         log_file = os.path.join(LOGS_DIR, "archived", env_id, "app.log")
-
     if not os.path.exists(log_file):
         return jsonify({"error": "Log file not found"}), 404
 
-    result = subprocess.run(
-        ["tail", "-n", "100", log_file],
-        capture_output=True, text=True
-    )
-    lines = result.stdout.splitlines()
+    result = subprocess.run(["tail", "-n", "100", log_file],
+                            capture_output=True, text=True)
+    lines  = result.stdout.splitlines()
     return jsonify({"env_id": env_id, "lines": lines, "count": len(lines)})
 
 
 @app.route("/envs/<env_id>/health", methods=["GET"])
 def get_health(env_id):
-    """GET /envs/:id/health — last 10 health check results"""
     health_file = os.path.join(LOGS_DIR, env_id, "health.log")
-
     if not os.path.exists(health_file):
-        return jsonify({"env_id": env_id, "results": [], "message": "No health data yet"})
+        return jsonify({"env_id": env_id, "results": [],
+                        "message": "No health data yet"})
 
-    result = subprocess.run(
-        ["tail", "-n", "10", health_file],
-        capture_output=True, text=True
-    )
-    lines = result.stdout.splitlines()
-
-    # Parse health log lines into structured data
+    result  = subprocess.run(["tail", "-n", "10", health_file],
+                              capture_output=True, text=True)
+    lines   = result.stdout.splitlines()
     results = []
     for line in lines:
         parts = line.split("|")
@@ -146,52 +143,36 @@ def get_health(env_id):
                 "latency":   parts[2].strip()
             })
 
-    # Get current env status
-    state = load_state(env_id)
+    state          = load_state(env_id)
     current_status = state["status"] if state else "unknown"
-
-    return jsonify({
-        "env_id":  env_id,
-        "status":  current_status,
-        "results": results
-    })
+    return jsonify({"env_id": env_id, "status": current_status,
+                    "results": results})
 
 
 @app.route("/envs/<env_id>/outage", methods=["POST"])
 def simulate_outage(env_id):
-    """POST /envs/:id/outage — trigger outage simulation"""
-    state = load_state(env_id)
-    if not state:
+    if not load_state(env_id):
         return jsonify({"error": f"Environment {env_id} not found"}), 404
 
     data = request.get_json(silent=True) or {}
     mode = data.get("mode", "")
-
     if not mode:
-        return jsonify({"error": "'mode' is required (crash|pause|network|recover|stress)"}), 400
+        return jsonify({"error": "'mode' required (crash|pause|network|recover|stress)"}), 400
 
-    code, out, err = run_script(
-        "platform/simulate_outage.sh",
-        "--env", env_id,
-        "--mode", mode
-    )
+    code, out, err = run_script("platform/simulate_outage.sh",
+                                "--env", env_id, "--mode", mode)
     if code != 0:
         return jsonify({"error": err or "Simulation failed"}), 500
 
-    return jsonify({
-        "message": f"Outage simulation '{mode}' applied to {env_id}",
-        "output":  out
-    })
+    return jsonify({"message": f"Outage '{mode}' applied to {env_id}", "output": out})
 
 
 @app.route("/health", methods=["GET"])
 def api_health():
-    """GET /health — API health check"""
     return jsonify({"status": "ok", "service": "sandbox-api"})
 
 
 if __name__ == "__main__":
     os.makedirs(ENVS_DIR, exist_ok=True)
     os.makedirs(LOGS_DIR, exist_ok=True)
-    port = int(os.getenv("API_PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=API_PORT, debug=False)

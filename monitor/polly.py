@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 poller.py — Health monitor for all active environments.
-Polls /health every 30 seconds. Marks env degraded after 3 failures.
+All config loaded from .env file — nothing hardcoded.
 """
 
 import os
@@ -11,11 +11,23 @@ import glob
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+from pathlib import Path
 
-ENVS_DIR    = "envs"
-LOGS_DIR    = "logs"
-POLL_INTERVAL = 30
-FAILURE_THRESHOLD = 3
+# ── Load .env if it exists ────────────────────────────────
+env_file = Path(".env")
+if env_file.exists():
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+
+# ── Config from environment variables ────────────────────
+ENVS_DIR          = "envs"
+LOGS_DIR          = "logs"
+POLL_INTERVAL     = int(os.getenv("HEALTH_POLL_INTERVAL",    "30"))
+FAILURE_THRESHOLD = int(os.getenv("HEALTH_FAILURE_THRESHOLD", "3"))
+NGINX_PORT        = os.getenv("NGINX_PORT", "80")
 
 # Track consecutive failures per env
 failure_counts = {}
@@ -51,13 +63,11 @@ def update_status(state_path, status):
 
 
 def poll_env(state_path, state):
-    env_id    = state["id"]
-    container = state["container"]
-    log_file  = os.path.join(LOGS_DIR, env_id, "health.log")
+    env_id   = state["id"]
+    log_file = os.path.join(LOGS_DIR, env_id, "health.log")
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
-    # Build health URL via nginx
-    url = f"http://localhost/{env_id}/health"
+    url = f"http://localhost:{NGINX_PORT}/{env_id}/health"
 
     start = time.time()
     try:
@@ -67,7 +77,6 @@ def poll_env(state_path, state):
         http_status = str(status_code)
         failure_counts[env_id] = 0
 
-        # Restore to running if it was degraded
         if state.get("status") == "degraded":
             update_status(state_path, "running")
             log(f"✅ {env_id} recovered — back to running")
@@ -84,7 +93,6 @@ def poll_env(state_path, state):
             update_status(state_path, "degraded")
             log(f"🔴 {env_id} marked as DEGRADED after {count} consecutive failures")
 
-    # Write to health log
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     with open(log_file, "a") as f:
         f.write(f"{ts} | {http_status} | {latency}ms\n")
@@ -94,10 +102,10 @@ def main():
     log("🏥 Health monitor started")
     log(f"   Polling every {POLL_INTERVAL}s")
     log(f"   Degraded after {FAILURE_THRESHOLD} consecutive failures")
+    log(f"   Nginx port: {NGINX_PORT}")
 
     while True:
         envs = load_envs()
-
         if not envs:
             log("   No active environments to monitor")
         else:
